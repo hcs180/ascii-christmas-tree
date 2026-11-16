@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ASCII Christmas Tree</title>
+<meta name="description" content="A rotating 3D Christmas tree drawn with coloured ASCII characters.">
+<meta name="theme-color" content="#0a0c14">
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0c14; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Rotating ASCII Christmas tree animation"></canvas>
+<script>
+"use strict";
+/*
+ * ASCII Christmas Tree - web version of christmas_tree.py.
+ * The scene is ~70k 3D points. Each frame they are rotated, projected onto a
+ * grid of character cells, z-buffered (nearest point wins), shaded, and drawn
+ * as a character picked by brightness.
+ */
+
+// ---------------------------------------------------------------- palette
+const GREEN_DARK = [0.05, 0.38, 0.12], GREEN = [0.25, 0.88, 0.32];
+const GOLD = [1.0, 0.76, 0.20], RED = [0.95, 0.14, 0.14], SILVER = [0.80, 0.85, 0.95];
+const BLUE = [0.30, 0.50, 1.00], WARM = [1.00, 0.86, 0.45], WHITE = [1, 1, 1];
+const BROWN = [0.45, 0.26, 0.10], GREEN_BOX = [0.10, 0.60, 0.35];
+const GROUND_C = [0.40, 0.45, 0.60], HUD_C = [0.50, 0.55, 0.66];
+const RAMP = ".:-~=+*^vxo%&#W@";                       // dark -> bright
+
+const SHADED = 0, LIGHT = 1, GROUND = 2, STAR = 3, TINSEL = 4;
+const N_LIGHTS = 140;
+const Y_BASE = 0.25, Y_TOP = 1.75, R_BASE = 0.80, TIERS = 5;
+const TARGET = [0, 0.85, 0], DIST = 4.2, PITCH = 0.30, SPEED = 0.35;
+
+// ---------------------------------------------------------------- helpers
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(7);
+const uni = (a, b) => a + (b - a) * rand();
+function gauss() {
+  const u = 1 - rand(), v = rand();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function norm3(x, y, z) { const l = Math.hypot(x, y, z) || 1; return [x / l, y / l, z / l]; }
+function fibSphere(n) {
+  const out = [], ga = Math.PI * (1 + Math.sqrt(5));
+  for (let i = 0; i < n; i++) {
+    const phi = Math.acos(1 - 2 * (i + 0.5) / n), th = ga * (i + 0.5);
+    out.push([Math.cos(th) * Math.sin(phi), Math.cos(phi), Math.sin(th) * Math.sin(phi)]);
+  }
+  return out;
+}
+function envelope(u) {                          // radius at height fraction u, with tiers
+  const f = (u * TIERS) % 1;
+  return [R_BASE * (1 - u) * (0.70 + 0.30 * (1 - f)), f];
+}
+const treeY = (u, f) => Y_BASE + u * (Y_TOP - Y_BASE) - 0.06 * (1 - f) * (1 - u);
+
+// ---------------------------------------------------------------- scene
+const S = { px: [], py: [], pz: [], nx: [], ny: [], nz: [], r: [], g: [], b: [],
+            kind: [], shine: [], phase: [], freq: [] };
+function add(p, n, c, kind = SHADED, shine = 0, phase = 0, freq = 0) {
+  S.px.push(p[0]); S.py.push(p[1]); S.pz.push(p[2]);
+  S.nx.push(n[0]); S.ny.push(n[1]); S.nz.push(n[2]);
+  S.r.push(c[0]); S.g.push(c[1]); S.b.push(c[2]);
+  S.kind.push(kind); S.shine.push(shine); S.phase.push(phase); S.freq.push(freq);
+}
+
+function buildScene() {
+  // foliage: a fuzzy tiered cone shell
+  const tips = [];
+  for (let i = 0; i < 22000; i++) {
+    const u = 1 - Math.sqrt(rand()), a = rand() * 2 * Math.PI;
+    const [env, f] = envelope(u), depth = rand();
+    const r = env * (0.80 + 0.20 * depth);
+    const p = [r * Math.cos(a), treeY(u, f), r * Math.sin(a)];
+    const n = norm3(Math.cos(a) + 0.35 * gauss(), 0.55 + 0.35 * gauss(), Math.sin(a) + 0.35 * gauss());
+    const m = Math.pow(rand(), 0.7) * (0.55 + 0.45 * depth), ao = 1 - 0.35 * f;
+    add(p, n, [0, 1, 2].map(k => (GREEN_DARK[k] * (1 - m) + GREEN[k] * m) * ao), SHADED, 0.15);
+    if (depth > 0.9) tips.push(p);
+  }
+
+  // fairy lights on the branch tips
+  const bulb = fibSphere(10), lightCols = [WARM, WARM, WARM, WARM, [1, 0.97, 0.9], RED];
+  for (let i = 0; i < N_LIGHTS; i++) {
+    const j = i + Math.floor(rand() * (tips.length - i));
+    [tips[i], tips[j]] = [tips[j], tips[i]];
+    const t = tips[i], col = lightCols[Math.floor(rand() * 6)];
+    const ph = rand() * 2 * Math.PI, fr = uni(1.5, 4.0);
+    for (const s of bulb)
+      add([t[0] * 1.05 + s[0] * 0.014, t[1] + s[1] * 0.014, t[2] * 1.05 + s[2] * 0.014],
+          [0, 1, 0], col, LIGHT, 0, ph, fr);
+  }
+
+  // gold tinsel garland: a spiral hugging the tiers
+  for (let i = 0; i < 10000; i++) {
+    const s = rand(), u = 0.03 + 0.85 * s, a = s * 3.25 * 2 * Math.PI;
+    const [env, f] = envelope(u), r = env * 1.04 + 0.015;
+    const p = [r * Math.cos(a) + 0.028 * gauss(), treeY(u, f) + 0.028 * gauss(), r * Math.sin(a) + 0.028 * gauss()];
+    const n = norm3(Math.cos(a) + 0.8 * gauss(), 0.3 + 0.8 * gauss(), Math.sin(a) + 0.8 * gauss());
+    const k = uni(0.7, 1.0);
+    add(p, n, rand() < 0.15 ? [1, 0.95, 0.8] : GOLD.map(v => v * k), TINSEL, 1.0);
+  }
+
+  // baubles: mostly red, some gold, silver and blue
+  const sphere = fibSphere(160), tierW = [5, 4, 3, 2, 1];
+  for (let k = 0; k < 34; k++) {
+    let x = rand() * 15, tier = 0;
+    while (x > tierW[tier]) { x -= tierW[tier]; tier++; }
+    const u = Math.min((tier + uni(0.08, 0.5)) / TIERS, 0.88);
+    const a = k * 2.39996 + rand() * 0.4, [env, f] = envelope(u);
+    const rad = 0.040 + 0.025 * (1 - u);
+    const c = [env * Math.cos(a), treeY(u, f) - 0.03, env * Math.sin(a)];
+    const col = k % 2 === 0 ? RED : [GOLD, SILVER, BLUE, RED][Math.floor(rand() * 4)];
+    for (const s of sphere) add([c[0] + s[0] * rad, c[1] + s[1] * rad, c[2] + s[2] * rad], s, col, SHADED, 0.9);
+  }
+
+  // trunk
+  for (let i = 0; i < 800; i++) {
+    const a = rand() * 2 * Math.PI;
+    add([0.08 * Math.cos(a), rand() * (Y_BASE + 0.05), 0.08 * Math.sin(a)], [Math.cos(a), 0, Math.sin(a)], BROWN);
+  }
+
+  // presents: boxes with a crossed ribbon and a bow
+  const gifts = [[0.30, 0.86, 0.30, 0.22, 0.26, 0.4, RED, GOLD],
+                 [1.50, 0.88, 0.24, 0.26, 0.24, 1.0, GOLD, RED],
+                 [2.60, 0.86, 0.34, 0.16, 0.28, 0.2, BLUE, SILVER],
+                 [3.70, 0.90, 0.24, 0.24, 0.24, 0.7, SILVER, RED],
+                 [4.70, 0.86, 0.28, 0.20, 0.30, 0.1, GREEN_BOX, GOLD],
+                 [5.60, 0.92, 0.22, 0.15, 0.22, 0.5, RED, WHITE]];
+  const loop = fibSphere(80);
+  const faceN = [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+  for (const [ang, dist, w, h, d, rot, body, rib] of gifts) {
+    const c = Math.cos(rot), s = Math.sin(rot);
+    const cx = dist * Math.cos(ang), cz = dist * Math.sin(ang);
+    const place = (lx, ly, lz, n, col) =>
+      add([c * lx + s * lz + cx, ly, -s * lx + c * lz + cz], [c * n[0] + s * n[2], n[1], -s * n[0] + c * n[2]], col, SHADED, 0.35);
+    const areas = [w * d, h * d, h * d, h * w, h * w], total = areas.reduce((x, y) => x + y);
+    const m = Math.floor(7000 * total);
+    for (let i = 0; i < m; i++) {
+      let x = rand() * total, face = 0;
+      while (x > areas[face]) { x -= areas[face]; face++; }
+      const fa = rand() - 0.5, fb = rand() - 0.5;
+      const lx = face === 1 ? w / 2 : face === 2 ? -w / 2 : fa * w;
+      const lz = face === 3 ? d / 2 : face === 4 ? -d / 2 : face === 0 ? fb * d : fa * d;
+      const ly = face === 0 ? h : (fb + 0.5) * h;
+      const onX = Math.abs(lx) < 0.022, onZ = Math.abs(lz) < 0.022;
+      const ribbon = face === 0 ? (onX || onZ) : face <= 2 ? onZ : onX;
+      place(lx, ly, lz, faceN[face], ribbon ? rib : body);
+    }
+    for (const sx of [-1, 1])
+      for (const q of loop) place(q[0] * 0.03 + sx * 0.03, q[1] * 0.022 + h + 0.02, q[2] * 0.012, q, rib);
+  }
+
+  // snowy ground disc, with a warm glow under the tree
+  for (let i = 0; i < 16000; i++) {
+    const r = 2.4 * Math.sqrt(rand()), a = rand() * 2 * Math.PI;
+    const glow = Math.exp(-r * r / 0.35) * 0.5, k = uni(0.45, 0.8);
+    add([r * Math.cos(a), 0, r * Math.sin(a)], [0, 1, 0],
+        [GROUND_C[0] * k + 0.5 * glow, GROUND_C[1] * k + 0.35 * glow, GROUND_C[2] * k + 0.1 * glow], GROUND);
+  }
+
+  // star on top: a flat 5-point star that always faces the camera
+  const verts = [];
+  for (let i = 0; i < 10; i++) {
+    const a = Math.PI / 2 + i * Math.PI / 5, r = i % 2 === 0 ? 0.085 : 0.036;
+    verts.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  for (let i = 0; i < 1500; i++) {
+    const t = Math.floor(rand() * 10);
+    let b1 = rand(), b2 = rand();
+    if (b1 + b2 > 1) { b1 = 1 - b1; b2 = 1 - b2; }
+    const v1 = verts[t], v2 = verts[(t + 1) % 10];
+    const x = v1[0] * b1 + v2[0] * b2, y = v1[1] * b1 + v2[1] * b2;
+    add([x, y, 0], [0, 0, -1], Math.hypot(x, y) < 0.03 ? [1, 1, 0.85] : GOLD, STAR);
+  }
+
+  for (const key in S) S[key] = Float32Array.from(S[key]);
+  S.n = S.px.length;
+  S.grain = Float32Array.from({ length: S.n }, rand);
+}
+buildScene();
+
+// ---------------------------------------------------------------- sky
+const sky = {
+  sx: Float32Array.from({ length: 220 }, rand), sy: Float32Array.from({ length: 220 }, () => rand() * 0.62),
+  sph: Float32Array.from({ length: 220 }, () => rand() * 6.28), sf: Float32Array.from({ length: 220 }, () => uni(0.5, 2.5)),
+  fx: Float32Array.from({ length: 160 }, rand), fy: Float32Array.from({ length: 160 }, rand),
+  fv: Float32Array.from({ length: 160 }, () => uni(0.03, 0.10)), fph: Float32Array.from({ length: 160 }, () => rand() * 6.28),
+  front: Uint8Array.from({ length: 160 }, () => (rand() < 0.25 ? 1 : 0)),
+};
+
+// ---------------------------------------------------------------- canvas
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d", { alpha: false });
+const FONT = '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace';
+let W = 0, H = 0, cw = 0, ch = 0, fs = 0, aspect = 2;
+let depth, who, gridCh, gridKey;
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  canvas.width = Math.round(vw * dpr); canvas.height = Math.round(vh * dpr);
+  // aim for ~58 rows, and at least ~95 columns on narrow (phone) screens
+  fs = Math.max(5, Math.min(14, vh / 58 / 1.2, vw / 95 / 0.6)) * dpr;
+  ctx.font = `${fs}px ${FONT}`;
+  cw = ctx.measureText("M").width; ch = Math.ceil(fs * 1.2);
+  aspect = ch / cw;
+  W = Math.max(20, Math.floor(canvas.width / cw)); H = Math.max(10, Math.floor(canvas.height / ch));
+  depth = new Float32Array(W * H); who = new Int32Array(W * H);
+  gridCh = new Uint8Array(W * H); gridKey = new Int32Array(W * H);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// colour cache: 15-bit key -> css string
+const cssCache = new Array(32768);
+function key(r, g, b) {
+  const q = v => Math.max(0, Math.min(31, (v * 255) >> 3));
+  return (q(r) << 10) | (q(g) << 5) | q(b);
+}
+function css(k) {
+  return cssCache[k] || (cssCache[k] = `rgb(${(k >> 10) << 3},${((k >> 5) & 31) << 3},${(k & 31) << 3})`);
+}
+
+// ---------------------------------------------------------------- render
+const L = norm3(-0.55, 0.65, -0.55), HV = norm3(L[0], L[1], L[2] - 1);
+const SP = " ".charCodeAt(0), DOT = ".".charCodeAt(0), DASH = "-".charCodeAt(0);
+const STAR_C = "*".charCodeAt(0), PLUS = "+".charCodeAt(0);
+const RAMP_C = Array.from(RAMP, c => c.charCodeAt(0));
+
+function putText(row, col, text, k) {
+  if (row < 0 || row >= H) return;
+  for (let i = 0; i < text.length && col + i < W; i++) {
+    if (col + i < 0) continue;
+    const id = row * W + col + i;
+    gridCh[id] = text.charCodeAt(i); gridKey[id] = k;
+  }
+}
+
+function render(t, theta, fps) {
+  const c = Math.cos(theta), s = Math.sin(theta), cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+  const r00 = c, r02 = s, r10 = -sp * s, r11 = cp, r12 = sp * c, r20 = -cp * s, r21 = -sp, r22 = cp * c;
+  const ty = Y_TOP + 0.05 - TARGET[1];
+  const tipX = 0, tipY = r11 * ty, tipZ = r21 * ty;
+
+  const fy = Math.min(0.66 * H * DIST / 1.95, 0.92 * W * DIST / 2.2 / aspect), fx = aspect * fy;
+  const ox = W * 0.5, oy = H * 0.45;
+  depth.fill(Infinity); who.fill(-1);
+
+  const { px, py, pz, kind } = S;
+  for (let i = 0; i < S.n; i++) {
+    let X, Y, Z;
+    if (kind[i] === STAR) { X = tipX + px[i]; Y = tipY + py[i]; Z = tipZ - 0.05; }
+    else {
+      const dx = px[i] - TARGET[0], dy = py[i] - TARGET[1], dz = pz[i] - TARGET[2];
+      X = r00 * dx + r02 * dz; Y = r10 * dx + r11 * dy + r12 * dz; Z = r20 * dx + r21 * dy + r22 * dz;
+    }
+    Z += DIST;
+    if (Z < 0.2) continue;
+    const xs = Math.floor(ox + X * fx / Z), ys = Math.floor(oy - (Y + 0.02) * fy / Z);
+    if (xs < 0 || xs >= W || ys < 0 || ys >= H) continue;
+    const id = ys * W + xs;
+    if (Z < depth[id]) { depth[id] = Z; who[id] = i; }
+  }
+
+  // shade the winning point of every cell
+  const pulse = 0.85 + 0.15 * Math.sin(t * 2.2);
+  for (let id = 0; id < W * H; id++) {
+    const i = who[id];
+    if (i < 0) { gridCh[id] = SP; continue; }
+    const k = kind[i], g = S.grain[i];
+    let cr = S.r[i], cg = S.g[i], cb = S.b[i], val;
+    if (k === GROUND) {
+      gridCh[id] = g < 0.7 ? DOT : DASH; gridKey[id] = key(cr, cg, cb); continue;
+    } else if (k === LIGHT) {
+      const tw = 0.5 + 0.5 * Math.sin(t * S.freq[i] + S.phase[i]), m = 0.35 + 0.8 * tw;
+      cr *= m; cg *= m; cb *= m; val = 0.55 + 0.45 * tw;
+    } else if (k === STAR) {
+      cr *= pulse; cg *= pulse; cb *= pulse; val = 0.8 + 0.2 * pulse + (g - 0.5) * 0.1;
+    } else {
+      const nx = S.nx[i], ny = S.ny[i], nz = S.nz[i];
+      const Nx = r00 * nx + r02 * nz, Ny = r10 * nx + r11 * ny + r12 * nz, Nz = r20 * nx + r21 * ny + r22 * nz;
+      const diff = Math.max(0, Nx * L[0] + Ny * L[1] + Nz * L[2]);
+      const spec = Math.pow(Math.max(0, Nx * HV[0] + Ny * HV[1] + Nz * HV[2]), 20) * S.shine[i];
+      const lum = 0.38 + 0.62 * diff;
+      val = lum * 0.85 + spec * 0.6 + (g - 0.5) * 0.16;
+      if (k === TINSEL) {
+        const m = 0.75 + 0.35 * lum;
+        cr = cr * m + spec; cg = cg * m + spec; cb = cb * m + spec;
+        val = Math.max(val, 0.6 + 0.3 * g);
+      } else {
+        cr = cr * lum + spec; cg = cg * lum + spec; cb = cb * lum + spec;
+      }
+    }
+    const ri = Math.max(0, Math.min(RAMP.length - 1, Math.round(val * (RAMP.length - 1))));
+    gridCh[id] = RAMP_C[ri]; gridKey[id] = key(cr, cg, cb);
+  }
+
+  // twinkling stars and snow only where nothing was drawn (some flakes fall in front)
+  for (let i = 0; i < sky.sx.length; i++) {
+    const id = Math.floor(sky.sy[i] * H) * W + Math.floor(sky.sx[i] * W);
+    if (gridCh[id] !== SP) continue;
+    const b = 0.5 + 0.5 * Math.sin(t * sky.sf[i] + sky.sph[i]), v = 0.3 + 0.7 * b;
+    gridCh[id] = b > 0.8 ? PLUS : DOT; gridKey[id] = key(v, v, v);
+  }
+  for (let i = 0; i < sky.fx.length; i++) {
+    const id = Math.min(H - 1, Math.floor(sky.fy[i] * H)) * W + Math.min(W - 1, Math.floor(sky.fx[i] * W));
+    if (!sky.front[i] && gridCh[id] !== SP) continue;
+    const v = sky.front[i] ? 0.95 : 0.6;
+    gridCh[id] = sky.front[i] ? STAR_C : DOT; gridKey[id] = key(v, v, v);
+  }
+
+  // HUD
+  let letters = 0;
+  for (let id = 0; id < W * H; id++) if (gridCh[id] !== SP) letters++;
+  const deg = ((theta * 180 / Math.PI) % 360 + 360) % 360;
+  const hud = ["christmas_tree.js   (drag to spin)",
+               `rotation ${deg.toFixed(1).padStart(6)} deg   lights ${N_LIGHTS}`,
+               `letters ${letters.toLocaleString("en-US")}   ${fps.toFixed(1).padStart(4)} fps`];
+  const hk = key(...HUD_C);
+  hud.forEach((line, i) => putText(H - hud.length + i, 0, line, hk));
+  const clock = `t ${t.toFixed(2).padStart(6)}s`;
+  putText(0, W - clock.length, clock, key(...GOLD));
+
+  // draw, batching cells by colour to keep fillStyle changes low
+  ctx.fillStyle = "#0a0c14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.font = `${fs}px ${FONT}`;
+  ctx.textBaseline = "top";
+  const buckets = new Map();
+  for (let id = 0; id < W * H; id++) {
+    if (gridCh[id] === SP) continue;
+    const k = gridKey[id];
+    let arr = buckets.get(k);
+    if (!arr) buckets.set(k, (arr = []));
+    arr.push(id);
+  }
+  for (const [k, ids] of buckets) {
+    ctx.fillStyle = css(k);
+    for (const id of ids) {
+      const x = id % W, y = (id - x) / W;
+      ctx.fillText(String.fromCharCode(gridCh[id]), x * cw, y * ch);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- loop + input
+let dragOffset = 0, dragging = false, lastX = 0, velocity = 0;
+canvas.addEventListener("pointerdown", e => { dragging = true; lastX = e.clientX; velocity = 0; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  const d = (e.clientX - lastX) * 0.01;
+  dragOffset -= d; velocity = -d; lastX = e.clientX;
+});
+const endDrag = () => { dragging = false; };
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+const t0 = performance.now();
+let prev = t0, lastDraw = 0, fps = 30;
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (now - lastDraw < 1000 / 31) return;          // cap at ~30 fps
+  const dt = Math.min(0.1, (now - prev) / 1000);
+  prev = now; lastDraw = now;
+  fps = 0.9 * fps + 0.1 / Math.max(dt, 1e-3);
+  const t = (now - t0) / 1000;
+  if (!dragging) { dragOffset += velocity; velocity *= 0.92; }
+  for (let i = 0; i < sky.fy.length; i++) {
+    sky.fy[i] = (sky.fy[i] + sky.fv[i] * dt) % 1;
+    sky.fx[i] = (sky.fx[i] + 0.015 * Math.sin(t * 0.7 + sky.fph[i]) * dt + 1) % 1;
+  }
+  render(t, t * SPEED + dragOffset, fps);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
